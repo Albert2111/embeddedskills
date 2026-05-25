@@ -26,6 +26,8 @@ from jlink_runtime import (
     normalize_path,
     hidden_subprocess_kwargs,
     is_missing,
+    is_wsl,
+    wsl_to_win_path,
 )
 
 # J-Link Commander 命令模板
@@ -174,6 +176,10 @@ def run_jlink(exe: str, device: str, action: str, interface: str = "SWD",
     """执行 JLink Commander 命令"""
     start_time = time.time()
 
+    # WSL 环境下调用 Windows JLink.exe 时需将路径转为 Windows 格式
+    _wsl_mode = is_wsl() and exe.lower().endswith(".exe")
+    file_for_script = wsl_to_win_path(file) if (_wsl_mode and file) else file
+
     # 选择模板
     if action == "flash":
         if file.lower().endswith(".bin"):
@@ -206,9 +212,9 @@ def run_jlink(exe: str, device: str, action: str, interface: str = "SWD",
     if action == "step":
         step_commands = "".join(["step\n" for _ in range(step_count)])
 
-    # 渲染命令脚本
+    # 渲染命令脚本（WSL 模式下固件路径已转为 Windows 格式）
     script_content = template.format(
-        interface=interface, speed=speed, file=file,
+        interface=interface, speed=speed, file=file_for_script,
         address=address, length=length, value=value, width=w,
         step_commands=step_commands, timeout_ms=timeout_ms,
     )
@@ -233,7 +239,9 @@ def run_jlink(exe: str, device: str, action: str, interface: str = "SWD",
                 "error": {"code": "file_not_found", "message": f"固件文件不存在: {file}"},
             }
 
-        cmd = build_jlink_cmd(exe, device, script_path, serial_no)
+        # WSL 模式下将临时脚本路径转为 Windows 路径（\\wsl.localhost\...）
+        script_cmd_path = wsl_to_win_path(script_path) if _wsl_mode else script_path
+        cmd = build_jlink_cmd(exe, device, script_cmd_path, serial_no)
 
         try:
             proc = subprocess.run(

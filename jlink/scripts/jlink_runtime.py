@@ -128,6 +128,30 @@ def _serialize_state_value(value: Any, workspace: Path) -> Any:
         return value
 
 
+def is_wsl() -> bool:
+    """检测是否运行在 WSL 环境下"""
+    if sys.platform != "linux":
+        return False
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def wsl_to_win_path(path: str) -> str:
+    """在 WSL 环境下将 Linux 路径转换为 Windows 路径（使用 wslpath -w）"""
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return path
+
+
 def hidden_subprocess_kwargs(*, new_process_group: bool = False) -> dict:
     if sys.platform != "win32":
         return {}

@@ -204,6 +204,30 @@ def _first_resolved(mapping: dict, keys: list[str]) -> tuple[Any, str | None]:
     return None, None
 
 
+def is_wsl() -> bool:
+    """检测是否运行在 WSL 环境下"""
+    if sys.platform != "linux":
+        return False
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
+
+
+def wsl_to_win_path(path: str) -> str:
+    """在 WSL 环境下将 Linux 路径转换为 Windows 路径（使用 wslpath -w）"""
+    try:
+        result = subprocess.run(
+            ["wslpath", "-w", path],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return path
+
+
 def _auto_detect_uv4() -> str:
     candidates = [
         which("UV4.exe"),
@@ -211,6 +235,11 @@ def _auto_detect_uv4() -> str:
         r"C:\Keil_v5\UV4\UV4.exe",
         r"C:\Keil_v5\ARM\UV4\UV4.exe",
     ]
+    if is_wsl():
+        candidates.extend([
+            "/mnt/c/Keil_v5/UV4/UV4.exe",
+            "/mnt/c/Keil_v5/ARM/UV4/UV4.exe",
+        ])
     keil_root = os.environ.get("KEIL_ROOT", "")
     if keil_root:
         candidates.append(str(Path(keil_root) / "UV4" / "UV4.exe"))

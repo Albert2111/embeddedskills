@@ -22,6 +22,7 @@ from keil_runtime import (  # noqa: E402
     get_state_entry,
     hidden_subprocess_kwargs,
     is_missing,
+    is_wsl,
     load_json_file,
     load_local_config,
     load_project_config,
@@ -36,6 +37,7 @@ from keil_runtime import (  # noqa: E402
     save_project_config,
     update_state_entry,
     workspace_root,
+    wsl_to_win_path,
 )
 
 
@@ -343,7 +345,12 @@ def run_uv4(uv4_exe: str, action: str, project: str, target: str, log_dir: str, 
     if action == "rebuild" and clean_first:
         flag = "-cr"
 
-    cmd = [uv4_exe, flag, str(project_path), "-j0", "-o", str(log_file)]
+    # WSL 环境下调用 Windows UV4.exe 时需将路径转为 Windows 格式
+    _wsl_mode = is_wsl() and uv4_exe.lower().endswith(".exe")
+    proj_arg = wsl_to_win_path(str(project_path)) if _wsl_mode else str(project_path)
+    log_arg = wsl_to_win_path(str(log_file)) if _wsl_mode else str(log_file)
+
+    cmd = [uv4_exe, flag, proj_arg, "-j0", "-o", log_arg]
     if target:
         cmd.extend(["-t", target])
 

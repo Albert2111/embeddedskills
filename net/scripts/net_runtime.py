@@ -23,9 +23,24 @@ WINDOWS_TOOL_DIRS = [
     Path(r"C:\Program Files (x86)\Wireshark"),
 ]
 
+WSL_WIRESHARK_DIRS = [
+    Path("/mnt/c/Program Files/Wireshark"),
+    Path("/mnt/c/Program Files (x86)/Wireshark"),
+]
+
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def is_wsl() -> bool:
+    """检测是否运行在 WSL 环境下"""
+    if sys.platform != "linux":
+        return False
+    try:
+        return "microsoft" in Path("/proc/version").read_text(encoding="utf-8").lower()
+    except OSError:
+        return False
 
 
 def is_missing(value: Any) -> bool:
@@ -76,10 +91,17 @@ def resolve_tool_path(configured: str | None, default_name: str) -> str:
         if resolved:
             return resolved
 
-    for base_dir in WINDOWS_TOOL_DIRS:
-        candidate_path = base_dir / default_name
-        if candidate_path.exists():
-            return str(candidate_path)
+    # WSL 环境下优先搜索 Windows 挂载路径，再搜索 Windows 路径
+    search_dirs = WSL_WIRESHARK_DIRS + WINDOWS_TOOL_DIRS if is_wsl() else WINDOWS_TOOL_DIRS
+    # WSL 下同时尝试 .exe 变体
+    name_variants = [default_name]
+    if is_wsl() and not default_name.endswith(".exe"):
+        name_variants.append(default_name + ".exe")
+    for base_dir in search_dirs:
+        for name in name_variants:
+            candidate_path = base_dir / name
+            if candidate_path.exists():
+                return str(candidate_path)
 
     return configured.strip() if configured and configured.strip() else default_name
 
@@ -248,9 +270,14 @@ def make_timing(start_time: float) -> dict:
     }
 
 
+def _default_tshark_name() -> str:
+    """获取当前平台对应的 tshark 可执行文件名"""
+    return "tshark.exe" if sys.platform == "win32" else "tshark"
+
+
 def check_tshark(exe: str = "tshark") -> bool:
     """检查 tshark 是否可用"""
-    resolved_exe = resolve_tool_path(exe, "tshark.exe" if sys.platform == "win32" else "tshark")
+    resolved_exe = resolve_tool_path(exe, _default_tshark_name())
     try:
         result = subprocess.run([resolved_exe, "--version"], capture_output=True, text=False, timeout=5)
         return result.returncode == 0
@@ -260,7 +287,7 @@ def check_tshark(exe: str = "tshark") -> bool:
 
 def parse_tshark_interfaces(tshark_exe: str = "tshark") -> list[dict] | None:
     """解析 tshark -D 获取抓包接口列表"""
-    resolved_exe = resolve_tool_path(tshark_exe, "tshark.exe" if sys.platform == "win32" else "tshark")
+    resolved_exe = resolve_tool_path(tshark_exe, _default_tshark_name())
     try:
         result = subprocess.run(
             [resolved_exe, "-D"], capture_output=True, text=False, timeout=10
@@ -287,8 +314,91 @@ def parse_tshark_interfaces(tshark_exe: str = "tshark") -> list[dict] | None:
     return interfaces
 
 
+def _prefix_to_mask(prefix: int) -> str:
+    """将 CIDR 前缀长度转换为点分十进制子网掩码"""
+    mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
+    return ".".join(str((mask >> i) & 0xFF) for i in [24, 16, 8, 0])
+
+
+def parse_ip_addr() -> list[dict]:
+    """解析 ip addr show / ip route show 获取网络接口信息（Linux/WSL）"""
+    import json as _json
+
+    try:
+        addr_result = subprocess.run(
+            ["ip", "-j", "addr", "show"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if addr_result.returncode != 0:
+            return []
+        ifaces_raw = _json.loads(addr_result.stdout)
+    except (FileNotFoundError, subprocess.TimeoutExpired, _json.JSONDecodeError, OSError):
+        return []
+
+    # 获取默认网关
+    gateways: dict[str, str] = {}
+    try:
+        route_result = subprocess.run(
+            ["ip", "-j", "route", "show"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if route_result.returncode == 0:
+            for route in _json.loads(route_result.stdout):
+                dev = route.get("dev", "")
+                gw = route.get("gateway", "")
+                if gw and dev and dev not in gateways:
+                    gateways[dev] = gw
+    except Exception:
+        pass
+
+    interfaces = []
+    for iface in ifaces_raw:
+        ifname = iface.get("ifname", "")
+        operstate = iface.get("operstate", "unknown").lower()
+        status = "up" if operstate in ("up", "unknown") else "down"
+        mac = iface.get("address", "")
+
+        ipv4_list: list[str] = []
+        subnet_list: list[str] = []
+        for addr_info in iface.get("addr_info", []):
+            if addr_info.get("family") == "inet":
+                ip = addr_info.get("local", "")
+                prefix = addr_info.get("prefixlen", 24)
+                if ip:
+                    ipv4_list.append(ip)
+                    subnet_list.append(_prefix_to_mask(prefix))
+
+        gw = gateways.get(ifname, "")
+        if "eth" in ifname or "en" in ifname:
+            iface_type = "以太网"
+        elif "wlan" in ifname or "wl" in ifname:
+            iface_type = "WLAN"
+        else:
+            iface_type = "本地连接"
+
+        interfaces.append({
+            "type": iface_type,
+            "name": ifname,
+            "description": iface.get("qdisc", ""),
+            "mac": mac,
+            "ipv4": ipv4_list[0] if ipv4_list else "",
+            "ipv4_list": ipv4_list,
+            "subnet": subnet_list[0] if subnet_list else "",
+            "subnet_list": subnet_list,
+            "gateway": gw,
+            "gateway_list": [gw] if gw else [],
+            "dhcp": "",
+            "status": status,
+        })
+
+    return interfaces
+
+
 def parse_ipconfig() -> list[dict]:
-    """解析 ipconfig /all 获取网络接口信息"""
+    """解析网络接口信息：Linux/WSL 使用 ip addr，Windows 使用 ipconfig /all"""
+    if sys.platform != "win32":
+        return parse_ip_addr()
+
     try:
         result = subprocess.run(
             ["ipconfig", "/all"], capture_output=True, text=True, encoding="gbk", errors="replace"
@@ -483,7 +593,7 @@ def get_net_config(
     sources["log_dir"] = src or "default"
 
     # 获取工具路径（环境级配置）
-    default_tshark = "tshark.exe" if sys.platform == "win32" else "tshark"
+    default_tshark = _default_tshark_name()
     default_capinfos = "capinfos.exe" if sys.platform == "win32" else "capinfos"
     tshark_exe = resolve_tool_path(local_cfg.get("tshark_exe"), default_tshark)
     capinfos_exe = resolve_tool_path(local_cfg.get("capinfos_exe"), default_capinfos)
